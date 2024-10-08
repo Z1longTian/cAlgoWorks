@@ -11,11 +11,12 @@ public class DataWindow : Plugin {
     // variables
     private AspTab _datawindow; // ActiveSymbolPanel tab 
     private StackPanel _container; // container for datawindow
-    private Grid _data; // data value grid
+    private Grid _data; // data grid
+    private Grid _indicators; // indicators grid
     
     // data labels
     private readonly List<string> _datalabels = new List<string> {
-        "Symbol", "Date", "Time", "Open", "High", "Low", "Close", "Size", "Tick Volume", "Spread", "Trading Session"
+        "Symbol", "Date", "Time", "Open", "High", "Low", "Close", "Size", "Tick Volume", "Spread", "Trading Session", "Pip Size"
     };
     private readonly List<TextBlock> _datatextblocks = new List<TextBlock>(); // data values
     
@@ -23,14 +24,15 @@ public class DataWindow : Plugin {
     private readonly List<string> _indicatorlabels = new List<string>();
     private readonly List<TextBlock> _indicatortextblocks = new List<TextBlock>();
     
+    // style control variables
+    private readonly int _textblockLength = 120;
+    
     // ToDos
-    // 1. styles
-    // 2. when index is not valid, show default values => active frame chart's values
+    // 1. styles - * Border overlaying problem from each textblocks
+    // 2. when index is not valid, show default values => active frame chart's values, and also keep updating values using bars event.
     // 3. adding 0s according to the pip size
-    // 4. Date needs to remove time
-    // 5. Both date and time needs to be same as UTC time ( change from server to utc time)
     // 6. Trading session using a different handler
-    // 7. adding a new textblock pipsize
+    // 7. adding a new textblock pipsize? - really needed?
     // 8. maybe adding current bid & ask of the symbol where mouse is moving at
     // 9. reorder textblocks
     
@@ -45,59 +47,72 @@ public class DataWindow : Plugin {
         foreach (ChartContainer cc in ChartManager.ChartContainers) {
             for (int i = 0; i < cc.Count; i++) {
                 if (cc[i] is ChartFrame chartframe) {
+                    chartframe.Chart.MouseEnter += MouseEnter;
                     chartframe.Chart.MouseMove += MouseMove;
+                    chartframe.Chart.MouseLeave += MouseLeave;
                 }
             }
         }
 
         // container for data window
-        _container = new StackPanel() {
-            HorizontalAlignment = HorizontalAlignment.Left,
-        };
-        // creating new data grid
-        _data = new Grid(0, 2) {
-            MinWidth = 200,
-            MaxWidth = 500,
+        _container = new StackPanel()
+        {
+            MinWidth = _textblockLength * 2 + 50,
+            HorizontalAlignment = HorizontalAlignment.Center,
         };
 
-        // adding label and data to grid
-        AddRow(_data, Title("Data"));
-        foreach (string label in _datalabels) {
+        // adding data section
+        _data = new Grid(0, 2); // create data grid
+        _container.AddChild(Title("Data"));
+        foreach (string label in _datalabels)
+        {
             TextBlock value = Value();
             _datatextblocks.Add(value);
             AddRow(_data, Border(Label(label)), Border(value));
         };
 
+        // adding indicators section
+        _indicators = new Grid(0, 2); // create indicators grid
+        AddRow(_indicators, Title("Indicators"));
+
         _container.AddChild(_data);
+        _container.AddChild(_indicators);
         _datawindow.Child = _container;
         // update textblocks for first time
         SyncToActiveFrame();
     }
 
+    
+
     // event handlers
     // MouseMove event - getting new index
     private void MouseMove(ChartMouseEventArgs obj) {
         int i = (int)obj.BarIndex;
-        Bars bars = MarketData.GetBars(obj.Chart.TimeFrame, obj.Chart.SymbolName);
-        if(i > 0 && i < bars.Count - 1) {
+        Chart chart = obj.Chart;
+        chart.ResetBarColors();
+        Bars bars = MarketData.GetBars(chart.TimeFrame, chart.SymbolName);
+        if(i > 0 && i < bars.Count) {
             Bar target = bars[i];
-            UpdateData(obj.Chart,target);
-            // indicators
-            foreach(ChartIndicator indicator in obj.Chart.Indicators) {
-                Print(indicator.Type.Outputs);
-                Print($"{indicator.Name}");
-                foreach(var param in indicator.Parameters) {
-                    Print($"{param.Name}: {indicator.Parameters[param.Name].Value}");
-                }
-                foreach(var output in indicator.Type.Outputs) {
-                    Print($"{output.Name}");
-                }
-
-            }
+            chart.SetBarOutlineColor(i, Color.Yellow);
+            UpdateData(chart,target);
         } else {
             SyncToActiveFrame();
         }
     }
+    private void MouseEnter(ChartMouseEventArgs obj) { // can handle some data, like pip size
+
+    }
+    private void MouseLeave(ChartMouseEventArgs obj) {
+        // start bar color reset timer, 100 = 0.1s
+        // using this because if mouse leave chart too quickly, resetcolor won't work
+        new System.Threading.Timer(ResetBarColorsTimer, new { obj.Chart }, 100, System.Threading.Timeout.Infinite);
+    }
+    // reset bar colors after 0.1s
+    private void ResetBarColorsTimer(object state) =>
+        BeginInvokeOnMainThread(() => {
+            ((dynamic)state).Chart.ResetBarColors();
+        });
+    
     // add MouseMove event to new frames
     private void FramesAdded(FramesAddedEventArgs obj) {
         foreach(Frame frame in obj.AddedFrames) {
@@ -119,22 +134,29 @@ public class DataWindow : Plugin {
     private ControlBase Border(ControlBase control) => new Border {
         Child = control,
         BorderThickness = new Thickness(1),
+        //BorderColor = Color.FromHex("#FCFAEE"),
         Padding = new Thickness(5),
-        BorderColor = Color.White,
     };
     private TextBlock Title(string text = "-") => new TextBlock {
         Text = text,
-        Margin = new Thickness(0, 0, 0, 10),
+        FontSize = 11,
+        FontStyle = FontStyle.Italic,
+        FontWeight = FontWeight.UltraBold,
+        FontFamily = "Consolas",
+        Opacity = 0.8,
+        Margin = new Thickness(0, 10, 0, 5),
     };
      private TextBlock Label(string text = "-") => new TextBlock {
         Text = text,
-        HorizontalContentAlignment = HorizontalAlignment.Left,
-        MinWidth = 150,
+        TextAlignment = TextAlignment.Left,
+        MinWidth = _textblockLength,
+        Margin = new Thickness(10, 0, 0, 0),
     };
     private TextBlock Value(string text = "-") => new TextBlock {
         Text = text,
-        HorizontalAlignment = HorizontalAlignment.Right,
-        MinWidth = 150
+        TextAlignment = TextAlignment.Right,
+        MinWidth = _textblockLength,
+        Margin = new Thickness(0, 0, 10, 0),
     };
 
    
@@ -153,17 +175,18 @@ public class DataWindow : Plugin {
     //"Symbol", "Date", "Time", "Open", "High", "Low", "Close", "Size", "Tick Volume", "Spread", "Pip Size"
     // utility methods
     private void UpdateData(Chart chart, Bar bar) {
-        _datatextblocks[0].Text = $"{chart.Symbol.Name}, {chart.TimeFrame.ShortName}"; // symbol name
-        _datatextblocks[1].Text = $"{bar.OpenTime.Date.Date}";                      // open date
-        _datatextblocks[2].Text = $"{bar.OpenTime.TimeOfDay}";                      // open time
-        _datatextblocks[3].Text = bar.Open.ToString();                                    // open
-        _datatextblocks[4].Text = $"{bar.High}";                                    // high
-        _datatextblocks[5].Text = $"{bar.Low}";                                     // low
-        _datatextblocks[6].Text = $"{bar.Close}";                                   // close
-        _datatextblocks[7].Text = $"{ToPips(bar.Close - bar.Open, chart.Symbol.PipSize)}";                // size
-        _datatextblocks[8].Text = $"{bar.TickVolume}";                              // tickvolume
-        _datatextblocks[9].Text = $"{ToPips(chart.Symbol.Spread, chart.Symbol.PipSize)}";               // spread
-        _datatextblocks[10].Text = $"{MarketSessions}";                             // market sessions
+        _datatextblocks[0].Text = $"{chart.Symbol.Name}, {chart.TimeFrame.ShortName}";           // symbol name
+        _datatextblocks[1].Text = bar.OpenTime.ToLocalTime().ToString("yyyy/MM/dd");             // open date
+        _datatextblocks[2].Text = bar.OpenTime.ToLocalTime().TimeOfDay.ToString();               // open time
+        _datatextblocks[3].Text = bar.Open.ToString();                                           // open
+        _datatextblocks[4].Text = bar.High.ToString();                                           // high
+        _datatextblocks[5].Text = bar.Low.ToString();                                            // low
+        _datatextblocks[6].Text = bar.Close.ToString();                                          // close
+        _datatextblocks[7].Text = ToPips(bar.Close - bar.Open, chart.Symbol.PipSize).ToString(); // size
+        _datatextblocks[8].Text = bar.TickVolume.ToString();                                     // tickvolume
+        _datatextblocks[9].Text = ToPips(chart.Symbol.Spread, chart.Symbol.PipSize).ToString();  // spread
+        _datatextblocks[10].Text = MarketSessions.ToString();                                    // market sessions
+        _datatextblocks[11].Text = chart.Symbol.PipSize.ToString();                              // pip size
     }
     
     // convert value to pips
