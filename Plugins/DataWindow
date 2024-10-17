@@ -1,5 +1,8 @@
 using System;
+using System.Linq;
+using System.Reflection;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using cAlgo.API;
 using cAlgo.API.Internals;
 
@@ -7,82 +10,91 @@ namespace cAlgo.Plugins;
 
 [Plugin(AccessRights = AccessRights.None)]
 public class DataWindow : Plugin {
-
+    
     // variables
+
+    
+    // main controls
     private AspTab _datawindow; // ActiveSymbolPanel tab 
     private StackPanel _container; // container for datawindow
-    private Grid _data; // data grid
-    private Grid _indicators; // indicators grid
-    
-    // data labels
-    private readonly List<string> _datalabels = new List<string> {
-        "Symbol", "Date", "Time", "Open", "High", "Low", "Close", "Size", "Tick Volume", "Spread", "Trading Session", "Pip Size"
-    };
-    private readonly List<TextBlock> _datatextblocks = new List<TextBlock>(); // data values
-    
-    // indicator labels
-    private readonly List<string> _indicatorlabels = new List<string>();
-    private readonly List<TextBlock> _indicatortextblocks = new List<TextBlock>();
-    
-    // style control variables
+    private TextBlock _sessiontextblock; // trading sessions textblock
     private readonly int _textblockLength = 120;
     
+    // symbol section
+    private Grid _symbolgrid; // symbol info grid
+    private readonly List<string> _symbollabels = new List<string> { // labels
+        "Symbol", "Ask", "Bid", "Spread", "Pip Size"
+    };
+    private readonly List<TextBlock> _symboltextblocks = new List<TextBlock>(); // values
+    
+    // data section
+    private Grid _datagrid; // data grid
+    private readonly List<string> _datalabels = new List<string> { // labels
+        "Date", "Time", "Open", "High", "Low", "Close", "Size", "Tick Volume"
+    };
+    private readonly List<TextBlock> _datatextblocks = new List<TextBlock>(); // values
     // ToDos
     // 1. styles - * Border overlaying problem from each textblocks
     // 2. when index is not valid, show default values => active frame chart's values, and also keep updating values using bars event.
-    // 3. adding 0s according to the pip size
-    // 6. Trading session using a different handler
-    // 7. adding a new textblock pipsize? - really needed?
-    // 8. maybe adding current bid & ask of the symbol where mouse is moving at
-    // 9. reorder textblocks
-    
+    // 3. design the settings window
+    // 4. able to select locations
+ 
     protected override void OnStart() {
+        //SetUpSettingBtn(); // set up setting buttons
+        Settings.Init(this);
         // asp setup
         _datawindow = Asp.AddTab("Data Window"); // add a new tab to asp
         _datawindow.Index = 1; // set the tab index, next to SymbolTab
         // event handlers setup
         ChartManager.FramesAdded += FramesAdded; // handle new added frames
         ChartManager.FramesRemoved += FramesRemoved; // handle removed frames
-        // adding MouseMove event handler to all chart frames
-        foreach (ChartContainer cc in ChartManager.ChartContainers) {
-            for (int i = 0; i < cc.Count; i++) {
-                if (cc[i] is ChartFrame chartframe) {
-                    chartframe.Chart.MouseEnter += MouseEnter;
-                    chartframe.Chart.MouseMove += MouseMove;
-                    chartframe.Chart.MouseLeave += MouseLeave;
+        foreach (ChartContainer chartcontainer in ChartManager.ChartContainers) {
+            for (int i = 0; i < chartcontainer.Count; i++) {
+                if (chartcontainer[i] is ChartFrame chartframe) {
+                    Chart chart = chartframe.Chart; // extract chart
+                    // mouse events
+                    chart.MouseEnter += MouseEnter;
+                    chart.MouseMove += MouseMove;
+                    chart.MouseLeave += MouseLeave;
+                    
                 }
             }
         }
 
+        MarketSessionsChanged += OnMarketSessionsChanged;
+
         // container for data window
-        _container = new StackPanel()
-        {
+        _container = new StackPanel() {
             MinWidth = _textblockLength * 2 + 50,
             HorizontalAlignment = HorizontalAlignment.Center,
         };
-
-        // adding data section
-        _data = new Grid(0, 2); // create data grid
-        _container.AddChild(Title("Data"));
-        foreach (string label in _datalabels)
-        {
+        // Trading Session section
+        Grid _sessiongrid = new Grid(0, 2);
+        _sessiontextblock = Title(MarketSessions.ToString());
+        AddRow(_sessiongrid, Title("Trading Sessions :"), _sessiontextblock);
+        // symbol section
+        _symbolgrid = new Grid(0, 2); // create symbol grid
+        AddRow(_symbolgrid, Title("Symbol"));
+        foreach (string label in _symbollabels) {
+            TextBlock value = Value();
+            _symboltextblocks.Add(value);
+            AddRow(_symbolgrid, Border(Label(label)), Border(value));
+        }
+        // data section
+        _datagrid = new Grid(0, 2); // create data grid
+        AddRow(_datagrid, Title("Data"));
+        foreach (string label in _datalabels) {
             TextBlock value = Value();
             _datatextblocks.Add(value);
-            AddRow(_data, Border(Label(label)), Border(value));
+            AddRow(_datagrid, Border(Label(label)), Border(value));
         };
-
-        // adding indicators section
-        _indicators = new Grid(0, 2); // create indicators grid
-        AddRow(_indicators, Title("Indicators"));
-
-        _container.AddChild(_data);
-        _container.AddChild(_indicators);
+        
+        _container.AddChild(_sessiongrid);
+        _container.AddChild(_symbolgrid);
+        _container.AddChild(_datagrid);
         _datawindow.Child = _container;
-        // update textblocks for first time
-        SyncToActiveFrame();
+        ShowActiveChartData();
     }
-
-    
 
     // event handlers
     // MouseMove event - getting new index
@@ -92,49 +104,72 @@ public class DataWindow : Plugin {
         chart.ResetBarColors();
         Bars bars = MarketData.GetBars(chart.TimeFrame, chart.SymbolName);
         if(i > 0 && i < bars.Count) {
-            Bar target = bars[i];
+            UpdateData(chart, bars[i]);
             chart.SetBarOutlineColor(i, Color.Yellow);
-            UpdateData(chart,target);
-        } else {
-            SyncToActiveFrame();
+            
         }
     }
-    private void MouseEnter(ChartMouseEventArgs obj) { // can handle some data, like pip size
-
+    // when mouse enters a chart
+    private void MouseEnter(ChartMouseEventArgs obj) {
+        // Creating controls
+        UpdateSymbolInfo(obj.Chart);
+        obj.Chart.Symbol.Tick += Symbol_Tick;
     }
+
+    
+    // when mouse left a chart
     private void MouseLeave(ChartMouseEventArgs obj) {
-        // start bar color reset timer, 100 = 0.1s
+        ShowActiveChartData();
+        obj.Chart.Symbol.Tick -= Symbol_Tick;
         // using this because if mouse leave chart too quickly, resetcolor won't work
         new System.Threading.Timer(ResetBarColorsTimer, new { obj.Chart }, 100, System.Threading.Timeout.Infinite);
     }
+    
+    private void OnMarketSessionsChanged(MarketSessionChangedEventArgs args) =>
+        _sessiontextblock.Text = args.NewSessions.ToString();
+    
     // reset bar colors after 0.1s
     private void ResetBarColorsTimer(object state) =>
         BeginInvokeOnMainThread(() => {
             ((dynamic)state).Chart.ResetBarColors();
         });
     
-    // add MouseMove event to new frames
+    // when chartframes added
     private void FramesAdded(FramesAddedEventArgs obj) {
         foreach(Frame frame in obj.AddedFrames) {
             if(frame is ChartFrame chartframe) {
+                // subscribe event handlers to added charts
+                chartframe.Chart.MouseEnter += MouseEnter;
                 chartframe.Chart.MouseMove += MouseMove;
+                chartframe.Chart.MouseLeave += MouseLeave;
             }
         }
     }
-    // remove MouseMove event from frames
+    // when chartframes removed
     private void FramesRemoved(FramesRemovedEventArgs obj) {
         foreach(Frame frame in obj.RemovedFrames) {
             if(frame is ChartFrame chartframe) {
+                // unsubscribe event handlers from removed charts
+                chartframe.Chart.MouseEnter -= MouseEnter;
                 chartframe.Chart.MouseMove -= MouseMove;
+                chartframe.Chart.MouseLeave -= MouseLeave;
             }
         }
     }
+    
+    private void Symbol_Tick(SymbolTickEventArgs obj) {
+        Print($"Getting tick from: {obj.SymbolName}");
+        _symboltextblocks[1].Text = obj.Ask.ToString();
+        _symboltextblocks[2].Text = obj.Bid.ToString();
+        _symboltextblocks[3].Text = ToPips(obj.Ask - obj.Bid, obj.Symbol.PipSize).ToString();
+    }
 
     // ui control methods
+    
     private ControlBase Border(ControlBase control) => new Border {
         Child = control,
         BorderThickness = new Thickness(1),
-        //BorderColor = Color.FromHex("#FCFAEE"),
+        BorderColor = Color.FromHex("#FCFAEE"),
         Padding = new Thickness(5),
     };
     private TextBlock Title(string text = "-") => new TextBlock {
@@ -145,6 +180,7 @@ public class DataWindow : Plugin {
         FontFamily = "Consolas",
         Opacity = 0.8,
         Margin = new Thickness(0, 10, 0, 5),
+        HorizontalAlignment = HorizontalAlignment.Left
     };
      private TextBlock Label(string text = "-") => new TextBlock {
         Text = text,
@@ -159,8 +195,6 @@ public class DataWindow : Plugin {
         Margin = new Thickness(0, 0, 10, 0),
     };
 
-   
-    
     private void AddRow(Grid grid, ControlBase child) {
         int i = grid.AddRow().Index;
         grid.AddChild(child, i, 0);
@@ -172,30 +206,194 @@ public class DataWindow : Plugin {
         grid.AddChild(col_item, i, 1);
     }
     
-    //"Symbol", "Date", "Time", "Open", "High", "Low", "Close", "Size", "Tick Volume", "Spread", "Pip Size"
     // utility methods
-    private void UpdateData(Chart chart, Bar bar) {
-        _datatextblocks[0].Text = $"{chart.Symbol.Name}, {chart.TimeFrame.ShortName}";           // symbol name
-        _datatextblocks[1].Text = bar.OpenTime.ToLocalTime().ToString("yyyy/MM/dd");             // open date
-        _datatextblocks[2].Text = bar.OpenTime.ToLocalTime().TimeOfDay.ToString();               // open time
-        _datatextblocks[3].Text = bar.Open.ToString();                                           // open
-        _datatextblocks[4].Text = bar.High.ToString();                                           // high
-        _datatextblocks[5].Text = bar.Low.ToString();                                            // low
-        _datatextblocks[6].Text = bar.Close.ToString();                                          // close
-        _datatextblocks[7].Text = ToPips(bar.Close - bar.Open, chart.Symbol.PipSize).ToString(); // size
-        _datatextblocks[8].Text = bar.TickVolume.ToString();                                     // tickvolume
-        _datatextblocks[9].Text = ToPips(chart.Symbol.Spread, chart.Symbol.PipSize).ToString();  // spread
-        _datatextblocks[10].Text = MarketSessions.ToString();                                    // market sessions
-        _datatextblocks[11].Text = chart.Symbol.PipSize.ToString();                              // pip size
+    //    0        1      2        3          4             
+    // "Symbol", "Ask", "Bid", "Spread", "Pip Size"
+    private void UpdateSymbolInfo(Chart chart) {
+        double pipsize = chart.Symbol.PipSize;
+        string dp = pipsize < 1 ? $"F{pipsize.ToString().Split(".")[1].Length + 1}" : "";
+        _symboltextblocks[0].Text = $"{chart.SymbolName}, {chart.TimeFrame.ShortName}";
+        //_symboltextblocks[1].Text = chart.Symbol.Ask.ToString(dp);
+        //_symboltextblocks[2].Text = chart.Symbol.Bid.ToString(dp);
+        //_symboltextblocks[3].Text = ToPips(chart.Symbol.Spread, pipsize).ToString();
+        _symboltextblocks[4].Text = pipsize.ToString();
     }
-    
+    //    0       1       2      3       4       5        6          7            
+    // "Date", "Time", "Open", "High", "Low", "Close", "Size", "Tick Volume"
+    private void UpdateData(Chart chart, Bar bar) {
+        double pipsize = chart.Symbol.PipSize;                                                   // symbol pipsize
+        string dp = pipsize < 1 ? $"F{pipsize.ToString().Split(".")[1].Length + 1}" : "";        // get number of dp
+        _datatextblocks[0].Text = bar.OpenTime.ToLocalTime().ToString("yyyy/MM/dd");             // open date
+        _datatextblocks[1].Text = bar.OpenTime.ToLocalTime().TimeOfDay.ToString();               // open time
+        _datatextblocks[2].Text = bar.Open.ToString(dp);                                         // open
+        _datatextblocks[3].Text = bar.High.ToString(dp);                                         // high
+        _datatextblocks[4].Text = bar.Low.ToString(dp);                                          // low
+        _datatextblocks[5].Text = bar.Close.ToString(dp);                                        // close
+        _datatextblocks[6].Text = ToPips(bar.Close - bar.Open, pipsize).ToString();              // size
+        _datatextblocks[7].Text = bar.TickVolume.ToString();                                     // tickvolume
+    }
     // convert value to pips
     private double ToPips(double val, double pipsize) => Math.Round(val/pipsize, 1);
     
-    // update data from active frame
-    private void SyncToActiveFrame() {
-        if (ChartManager.ActiveFrame is ChartFrame active) {
-            UpdateData(active.Chart, MarketData.GetBars(active.Chart.TimeFrame, active.Chart.SymbolName).LastBar);
+    // show data of the active chart
+    private void ShowActiveChartData() {
+        if ( ChartManager.ActiveFrame is ChartFrame active) {
+            UpdateSymbolInfo(active.Chart);
+            UpdateData(active.Chart, active.Chart.Bars.LastBar);
         }
+    }
+
+    // settings manager, has to run Init first
+    private static class Settings {   
+        // enums
+        // data window location enum
+        public enum Location {
+            NewTab,
+            Frame,
+            SymbolPanel,
+            OnChart
+        }
+        // events
+        public static event Action<string, object> SettingsModified; // change event
+        public static event Action SettingsReset; // reset event
+        //variables
+        private static DataWindow _; // outter class
+        private static Window _window;
+        private static LocalStorage _storage; // local storatge
+        private static readonly Dictionary<string, object> _default = new () { // default settings
+            { "Location", Location.NewTab }, { "ShowTradingSessions", true },
+            { "ShowSymbolSection", true }, { "ShowSymbolName", true }, { "ShowAsk", true }, { "ShowBid", true }, { "ShowSpread", true }, { "ShowPipSize", true },
+            { "ShowDataSection", true }, { "CombineDateTime", false }, { "ShowDate", true }, { "ShowTime", true },
+            { "ShowOpen", true }, { "ShowHigh", true }, { "ShowLow", true }, { "ShowClose", true },
+            { "ShowSize", true }, { "ShowTickVolume", true },
+        };
+        // Initialise
+        public static void Init(DataWindow outter){
+            _ = outter; 
+            _storage = _.LocalStorage; // local storage
+            Settings.CreateWindow();
+            // setup the icon in toolbar
+            SvgIcon settingIcon = new(@"<svg viewBox='0 0 1024 1024' class='icon' version='1.1' xmlns='http://www.w3.org/2000/svg' fill='#000000'><g id='SVGRepo_bgCarrier' stroke-width='0'></g><g id='SVGRepo_tracerCarrier' stroke-linecap='round' stroke-linejoin='round'></g><g id='SVGRepo_iconCarrier'><path d='M897.28 597.76l-74.24-53.76c1.28-10.24 1.28-21.76 1.28-32 0-11.52 0-21.76-1.28-32l74.24-53.76c12.8-7.68 16.64-23.04 8.96-34.56l-90.88-154.88c-7.68-12.8-23.04-16.64-35.84-8.96l-84.48 37.12c-17.92-12.8-37.12-23.04-57.6-32l-7.68-92.16c0-14.08-11.52-25.6-25.6-25.6H422.4c-14.08 0-25.6 11.52-25.6 25.6l-8.96 90.88c-20.48 8.96-39.68 19.2-57.6 32l-84.48-37.12c-12.8-7.68-28.16-2.56-35.84 8.96l-89.6 156.16c-7.68 12.8-2.56 28.16 8.96 34.56l74.24 53.76c-1.28 10.24-1.28 21.76-1.28 32s0 21.76 1.28 32l-74.24 53.76c-12.8 7.68-16.64 23.04-8.96 34.56l90.88 154.88c7.68 12.8 23.04 16.64 35.84 8.96l84.48-37.12c17.92 12.8 37.12 23.04 57.6 32L396.8 883.2c0 14.08 11.52 25.6 25.6 25.6h181.76c14.08 0 25.6-11.52 25.6-25.6l8.96-90.88c20.48-8.96 39.68-19.2 57.6-32l84.48 37.12c12.8 7.68 28.16 2.56 35.84-8.96l90.88-154.88c6.4-12.8 1.28-28.16-10.24-35.84z m-384 65.28c-84.48 0-153.6-67.84-153.6-151.04s69.12-151.04 153.6-151.04 153.6 67.84 153.6 151.04-69.12 151.04-153.6 151.04z' fill='#FAC546'></path><path d='M604.16 921.6H422.4c-20.48 0-38.4-16.64-38.4-37.12l-8.96-81.92c-16.64-7.68-32-16.64-46.08-26.88l-76.8 34.56c-17.92 10.24-42.24 3.84-52.48-14.08L108.8 638.72c-5.12-8.96-6.4-19.2-3.84-29.44 2.56-10.24 8.96-17.92 17.92-23.04l67.84-48.64c-1.28-8.96-1.28-17.92-1.28-26.88s0-17.92 1.28-26.88L122.88 435.2c-8.96-5.12-15.36-12.8-17.92-23.04-2.56-10.24-1.28-20.48 3.84-29.44l90.88-154.88c10.24-17.92 33.28-24.32 52.48-14.08l76.8 34.56c14.08-10.24 30.72-19.2 46.08-26.88l8.96-81.92C384 119.04 400.64 102.4 422.4 102.4h181.76c20.48 0 38.4 16.64 38.4 37.12l8.96 81.92c16.64 7.68 32 16.64 46.08 26.88l76.8-34.56c17.92-10.24 42.24-3.84 52.48 14.08l90.88 154.88c5.12 8.96 6.4 19.2 3.84 29.44-2.56 10.24-8.96 17.92-17.92 23.04l-67.84 48.64c1.28 8.96 1.28 17.92 1.28 26.88 0 8.96 0 17.92-1.28 26.88l67.84 48.64c8.96 5.12 15.36 12.8 17.92 23.04 2.56 10.24 1.28 20.48-3.84 29.44L826.88 793.6c-10.24 17.92-33.28 24.32-52.48 14.08l-76.8-34.56c-14.08 10.24-30.72 19.2-46.08 26.88l-8.96 81.92c0 23.04-17.92 39.68-38.4 39.68zM330.24 747.52c2.56 0 5.12 1.28 7.68 2.56 16.64 12.8 35.84 23.04 55.04 30.72 3.84 1.28 7.68 6.4 7.68 10.24l8.96 90.88v1.28c0 7.68 6.4 12.8 12.8 12.8h181.76c7.68 0 12.8-5.12 12.8-12.8v-1.28l8.96-90.88c0-5.12 3.84-8.96 7.68-10.24 19.2-8.96 37.12-19.2 55.04-30.72 3.84-2.56 8.96-2.56 12.8-1.28l84.48 37.12h1.28c6.4 3.84 14.08 1.28 17.92-5.12L896 625.92c1.28-2.56 2.56-6.4 1.28-8.96-1.28-3.84-2.56-6.4-6.4-7.68 0 0-1.28 0-1.28-1.28l-74.24-53.76c-3.84-2.56-6.4-7.68-5.12-11.52 1.28-10.24 1.28-20.48 1.28-30.72 0-10.24 0-20.48-1.28-30.72 0-5.12 1.28-8.96 5.12-11.52l74.24-53.76s1.28 0 1.28-1.28c2.56-1.28 5.12-5.12 6.4-7.68 1.28-3.84 0-6.4-1.28-8.96L805.12 243.2c-3.84-6.4-11.52-7.68-17.92-5.12h-1.28l-84.48 37.12c-3.84 1.28-8.96 1.28-12.8-1.28-16.64-12.8-35.84-23.04-55.04-30.72-3.84-1.28-7.68-6.4-7.68-10.24l-8.96-90.88V140.8c0-7.68-6.4-12.8-12.8-12.8H422.4c-7.68 0-12.8 5.12-12.8 12.8v1.28l-8.96 90.88c0 5.12-3.84 8.96-7.68 10.24-19.2 8.96-37.12 19.2-55.04 30.72-3.84 2.56-8.96 2.56-12.8 1.28l-84.48-37.12h-1.28c-6.4-3.84-14.08-1.28-17.92 5.12l-90.88 154.88c-1.28 2.56-2.56 6.4-1.28 8.96 1.28 3.84 2.56 6.4 6.4 7.68 0 0 1.28 0 1.28 1.28l74.24 53.76c3.84 2.56 6.4 7.68 5.12 11.52-1.28 10.24-1.28 20.48-1.28 30.72s0 20.48 1.28 30.72c0 5.12-1.28 8.96-5.12 11.52l-74.24 53.76s-1.28 0-1.28 1.28c-2.56 1.28-5.12 5.12-6.4 7.68-1.28 3.84 0 6.4 1.28 8.96L221.44 780.8c3.84 6.4 11.52 7.68 17.92 5.12h1.28l84.48-37.12c1.28-1.28 2.56-1.28 5.12-1.28z m183.04-71.68c-92.16 0-166.4-74.24-166.4-163.84s74.24-163.84 166.4-163.84 166.4 74.24 166.4 163.84-75.52 163.84-166.4 163.84z m0-302.08c-78.08 0-140.8 62.72-140.8 138.24 0 76.8 62.72 138.24 140.8 138.24s140.8-62.72 140.8-138.24c0-76.8-64-138.24-140.8-138.24z' fill='#231C1C'></path><path d='M513.28 332.8C413.44 332.8 332.8 413.44 332.8 512s80.64 179.2 180.48 179.2 180.48-80.64 180.48-179.2-81.92-179.2-180.48-179.2z m0 281.6c-57.6 0-103.68-46.08-103.68-102.4s46.08-102.4 103.68-102.4 103.68 46.08 103.68 102.4-47.36 102.4-103.68 102.4z' fill='#E1E0A6'></path><path d='M513.28 704C407.04 704 320 618.24 320 512s87.04-192 193.28-192 193.28 85.76 193.28 192c-1.28 106.24-87.04 192-193.28 192z m0-358.4C421.12 345.6 345.6 419.84 345.6 512s75.52 166.4 167.68 166.4c92.16 0 167.68-74.24 167.68-166.4-1.28-92.16-75.52-166.4-167.68-166.4z m0 281.6c-64 0-116.48-51.2-116.48-115.2s52.48-115.2 116.48-115.2 116.48 51.2 116.48 115.2-52.48 115.2-116.48 115.2z m0-204.8c-49.92 0-90.88 39.68-90.88 89.6s40.96 89.6 90.88 89.6c49.92 0 90.88-39.68 90.88-89.6s-40.96-89.6-90.88-89.6z' fill='#231C1C'></path></g></svg>");
+            Command setting = _.Commands.Add(CommandType.ChartContainerToolbar, (args) => { 
+            if(_window.IsVisible) _window.Hide(); else _window.Show();
+            }, settingIcon);
+            setting.ToolTip = "Settings";
+            
+        }
+        
+        public static T Get<T>(string key) => _default.ContainsKey(key) ? (T)_storage.GetObject<object>(key, LocalStorageScope.Instance) ?? (T)_default[key] : default;
+        
+        public static void Set(string key, object value) {
+            if(_default.ContainsKey(key)) {
+                if(_default[key].Equals(value)) _storage.Remove(key, LocalStorageScope.Instance);
+                else _storage.SetObject(key, value, LocalStorageScope.Instance);
+                SettingsModified?.Invoke(key, value);
+            }
+        }
+ 
+        // reset to default settings
+        public static void ResetToDefaults() {
+            foreach(string key in _default.Keys) {
+                _storage.Remove(key, LocalStorageScope.Instance);
+            }
+            SettingsReset?.Invoke();
+        }
+        
+        public static void CreateWindow() {
+            _window = new Window {
+                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                Topmost = true,
+                Title = "Settings",
+                MaxWidth = 500,
+            };
+            // if closed through button, create a new window for later use
+            _window.Closed += (args) => {
+                Settings.CreateWindow();
+            };
+            
+            StackPanel container = new() {
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(30)
+            };
+
+            
+            Toggle t2 = new ("key", "test", status: false);
+            t2.StatusChanged += (key, value) => {
+
+            };
+            container.AddChild(t2);
+            
+            _window.Child = container;
+        }
+    }
+    // fixed styled toggle button
+    private class Toggle : CustomControl {
+        // variables
+        private readonly int _panelWidth = 300; // panel width
+        private readonly int _size = 20; // toggle size
+        private readonly string _key; // settings key
+        public bool Status { get; private set; } // true = on, false = off
+        public string Text { get; } // setting label
+        // events
+        public event Action<string, bool> StatusChanged; // status changed event
+        // constructor
+        public Toggle(string key, string text, bool status = true) {
+            // assignments
+            Status = status;
+            Text = text;
+            _key = key;
+            // container init
+            Grid container = new (1, 2) {
+                Width = _panelWidth,
+            };
+            // creating and styling objects
+            TextBlock txt = new() {
+                Text = text,
+                FontSize = 20,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            SetTextStyle(txt);
+            Border control = new() {
+                Margin = 0, 
+                Width = _size, 
+                Height = _size, 
+                BackgroundColor = Color.Purple, 
+                CornerRadius = _size
+            };
+            SetControlStyle(control);
+            Button toggle = new() {
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center,
+                Width = _size * 2,
+                Height = _size,
+                Padding = 0,
+                CornerRadius = _size / 2,
+                HorizontalContentAlignment = HorizontalAlignment.Right,
+                Content = control
+            };
+            SetToggleStyle(toggle);
+            // register click method
+            toggle.Click += args => {
+                Switch();
+                SetTextStyle(txt);
+                SetToggleStyle(toggle);
+                SetControlStyle(control);
+                StatusChanged?.Invoke(_key, this.Status); // fire event
+            };
+            // register objects 
+            container.AddChild(txt, 0, 0);
+            container.AddChild(toggle, 0, 1);
+            AddChild(container);
+        }
+        
+        public void Switch() => Status = !Status; // switch current status
+        // style controls
+        private void SetTextStyle(TextBlock text) => text.Opacity = Status ? 1 : 0.3;
+        private void SetControlStyle(Border control) => control.BackgroundColor = Status ? Color.SpringGreen : Color.LightGray;
+        private void SetToggleStyle(Button toggle) {
+            toggle.BackgroundColor = Status ? Color.Green : Color.Gray;
+            toggle.HorizontalContentAlignment = Status ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+        }    
     }
 }        
