@@ -6,7 +6,6 @@ using cAlgo.API.Internals;
 //using System.Reflection;
 //using System.Text.RegularExpressions;
 
-
 namespace cAlgo.Plugins;
 
 [Plugin(AccessRights = AccessRights.None)]
@@ -14,7 +13,6 @@ public class DataWindow : Plugin
 {
 
     private Settings _settings; // settings instance
-    //private readonly StackPanel _datawindow = new(); // main datawindow container
     private Section _symbolSection;
     private Section _dataSection;
     
@@ -34,20 +32,35 @@ public class DataWindow : Plugin
                 if (chartcontainer[i] is ChartFrame chartframe) RegisterChartEventHandlers(chartframe.Chart);
             }
         }
-
         // create sections and register them
         StackPanel datawindow = new();
         _symbolSection = new Section("Symbol", Settings.Key.SymbolSection, _settings.SymbolSettings);
         _dataSection = new Section("Data", Settings.Key.DataSection, _settings.DataSettings);
         datawindow.AddChild(_symbolSection);
         datawindow.AddChild(_dataSection);
-        dataWindowTab.Child = UI.AddBoxBorder(datawindow);
+        dataWindowTab.Child = UI.AddBoxBorder(datawindow, new (1, 1, 5, 0));
     }
     
     // event handlers
     private void SymbolTick(SymbolTickEventArgs args)
     {
         UpdateSymbolSection(args.Symbol);
+        _symbolSection[Settings.Key.Ask].ForegroundColor = Color.Green;
+        _symbolSection[Settings.Key.Bid].ForegroundColor = Color.Red;
+        new System.Threading.Timer 
+        (
+            (args) => { // call back method 
+                BeginInvokeOnMainThread(() =>  {
+                
+                   // using timer to reset bar outline after 0.1s as resetcolor won't work if mouse left chart too quickly
+                    _symbolSection[Settings.Key.Ask].ForegroundColor = Color.White;
+                    _symbolSection[Settings.Key.Bid].ForegroundColor = Color.White; 
+                });
+            },
+            new {},
+            300, // timeout
+            System.Threading.Timeout.Infinite
+        );
     }
     
     private void ChartMouseEnter(ChartMouseEventArgs args)
@@ -66,7 +79,7 @@ public class DataWindow : Plugin
         if( i > 0 && i < bars.Count) 
         {
             UpdateDataSection(chart, bars[i]);
-            chart.SetBarOutlineColor(i, Color.Yellow);
+            if((bool)_settings[Settings.Key.HighlightBar]) chart.SetBarColor(i, Color.Purple);
         }
     }
     
@@ -78,7 +91,8 @@ public class DataWindow : Plugin
         (
             (args) => { // call back method 
                 BeginInvokeOnMainThread(() =>  {
-                    ((dynamic)args).Chart.ResetBarColors(); // using timer to reset bar outline after 0.1s as resetcolor won't work if mouse left chart too quickly
+                   // using timer to reset bar outline after 0.1s as resetcolor won't work if mouse left chart too quickly
+                   if((bool)_settings[Settings.Key.HighlightBar]) ((dynamic)args).Chart.ResetBarColors(); 
                 });
             },
             new { args.Chart },
@@ -116,13 +130,13 @@ public class DataWindow : Plugin
         chart.MouseMove -= ChartMouseMove;
         chart.MouseLeave -= ChartMouseLeave;
     }
-    // update name and pipsize
+    // update name and pipsize in symbol section
     private void UpdateSymbolSection(Chart chart)
     {
         _symbolSection[Settings.Key.SymbolName].Text = $"{chart.SymbolName}, {chart.TimeFrame.ShortName}";
         _symbolSection[Settings.Key.PipSize].Text = chart.Symbol.PipSize.ToString();
     }
-    // update ask, bid and spread
+    // update ask, bid and spread in symbol section
     private void UpdateSymbolSection(Symbol symbol)
     {
         string dp = $"F{Util.GetDP(symbol.PipSize)}";
@@ -130,7 +144,7 @@ public class DataWindow : Plugin
         _symbolSection[Settings.Key.Bid].Text = symbol.Bid.ToString(dp);
         _symbolSection[Settings.Key.Spread].Text = Util.ToPips((symbol.Ask - symbol.Bid), symbol.PipSize).ToString("F1");
     }
-    
+    // update everything in data section
     private void UpdateDataSection(Chart chart, Bar bar) 
     {
         double pipsize = chart.Symbol.PipSize;
@@ -161,6 +175,7 @@ public class DataWindow : Plugin
             }
             sectionContainer.AddChild(UI.AddBorder(rowsContainer, new Thickness(1, 1, 1, 0)));
             this.AddChild(sectionContainer); // register section
+            this.IsVisible =(bool) Settings.Instance[control];
             // show or hide when setting changes
             Settings.Instance.SettingsModified += (key, value) => { if(key == control) this.IsVisible = value; };
         }
@@ -170,7 +185,6 @@ public class DataWindow : Plugin
             get => _textblocks[key];
             set => _textblocks[key].Text = $"{value}";
         }
-        
     }
     
     // Settings Manager
@@ -178,7 +192,7 @@ public class DataWindow : Plugin
     {
         public enum Key 
         { // setting keys
-            SymbolSection, DataSection, IndicatorsSection,
+            SymbolSection, DataSection, IndicatorsSection, HighlightBar,
             SymbolName, Ask, Bid, Spread, PipSize,
             Date, Time, Open, High, Low, Close, Size, TickVolume,
         }
@@ -190,7 +204,7 @@ public class DataWindow : Plugin
         private Dictionary<Key, bool> _settings; // current settings
         private Window _menu; // main settings menu
         public static Settings Instance = new(); // singleton instance
-        private readonly List<Key> GeneralSettings = new() {Key.SymbolSection, Key.DataSection};
+        private readonly List<Key> GeneralSettings = new() {Key.SymbolSection, Key.DataSection, Key.HighlightBar};
         public readonly List<Key> SymbolSettings = new() { Key.SymbolName, Key.Ask, Key.Bid, Key.Spread, Key.PipSize };
         public readonly List<Key> DataSettings = new() { Key.Date, Key.Time, Key.Open, Key.High, Key.Low, Key.Close, Key.Size, Key.TickVolume };
         private Settings() {} // constructor
@@ -207,7 +221,10 @@ public class DataWindow : Plugin
             Window menu = new() 
             {
                 WindowStartupLocation = WindowStartupLocation.CenterScreen,
-                Topmost = true, Title = "Settings", MaxWidth = 400,
+                Topmost = true, 
+                Title = "Settings", 
+                MaxWidth = 400,
+                MaxHeight = 600,
                 ResizeMode = ResizeMode.NoResize
             };
             StackPanel container = new() 
@@ -215,13 +232,15 @@ public class DataWindow : Plugin
                 HorizontalAlignment = HorizontalAlignment.Center, 
                 Margin = UI.Spacer 
             };
-            container.AddChild(CreateSubMenu("General Settings", GeneralSettings, null));
-            container.AddChild(CreateSubMenu("Symbol Section Settings", SymbolSettings, Key.SymbolSection));
-            container.AddChild(CreateSubMenu("DataSection Settings", DataSettings, Key.DataSection));
+            container.AddChild(CreateSubMenu("General", GeneralSettings, null));
+            container.AddChild(CreateSubMenu("Symbol Section", SymbolSettings, Key.SymbolSection));
+            container.AddChild(CreateSubMenu("Data Section", DataSettings, Key.DataSection));
             container.AddChild(CreateMenuFunctionButtons());
-            menu.Child = UI.AddBoxBorder(container);
+            menu.Child = UI.AddBoxBorder(container, null);
+
             return menu;
         }
+        
         // sub menu inside main menu
         private ControlBase CreateSubMenu(string subtitle, List<Key> keys, Key? parentkey) 
         {
@@ -239,7 +258,8 @@ public class DataWindow : Plugin
         
             Grid buttonsGrid = new(1, 2) 
             {
-                Margin = new Thickness(0, 20, 0, 0)
+                Margin = new Thickness(0, 20, 0, 0),
+                VerticalAlignment = VerticalAlignment.Bottom
             };
             // reset button
             Button resetButton = new() 
@@ -280,13 +300,14 @@ public class DataWindow : Plugin
             private set 
             {
                 _settings[(Key)key] = (bool)value;
+                _datawindow.LocalStorage.SetObject(_lskey, _settings);
                 SettingsModified?.Invoke((Key)key, _settings[(Key)key]);
             }
         }
         // get defaul settings
         private Dictionary<Key, bool> GetDefaultSettings() => new() 
         {
-            { Key.SymbolSection, true }, { Key.DataSection, true},
+            { Key.SymbolSection, true }, { Key.DataSection, true}, { Key.HighlightBar, true },
             { Key.SymbolName, true }, { Key.Ask, true }, { Key.Bid, true }, { Key.Spread, true }, { Key.PipSize, true }, 
             { Key.Date, true }, { Key.Time, true }, { Key.Open, true }, { Key.High, true }, { Key.Low, true }, { Key.Close, true },
             { Key.Size, true }, { Key.TickVolume, true }
@@ -297,8 +318,7 @@ public class DataWindow : Plugin
             var defaultSettings = GetDefaultSettings();
             foreach(Key key in defaultSettings.Keys)
             {
-               if(Instance[key] != defaultSettings[key]) 
-                   Instance[key] = defaultSettings[key];
+               if(Instance[key] != defaultSettings[key]) Instance[key] = defaultSettings[key];
             }
         }
     }
@@ -310,12 +330,12 @@ public class DataWindow : Plugin
         // textblock style for section title
         public static TextBlock SectionTitle(string title) => new()  
         {
-            Text = title, FontSize = 12, 
+            Text = title, FontSize = 10, 
             FontStyle = FontStyle.Italic,
             FontWeight = FontWeight.UltraBold, 
             FontFamily = "Consolas",
             Opacity = 0.8, 
-            Margin = new Thickness(0, 15, 0, 10), 
+            Margin = new Thickness(0, 15, 0, 5), 
             HorizontalAlignment = HorizontalAlignment.Left
         };
         public static TextBlock RowLabel(string label) => new() 
@@ -323,7 +343,7 @@ public class DataWindow : Plugin
             Text = label,
             HorizontalAlignment = HorizontalAlignment.Left,
             Margin = new Thickness(10, 0, 0, 0),
-            Padding = new Thickness(5)
+            Padding = new Thickness(5),
         };    
         public static TextBlock RowValue(string value = "-") => new() 
         {
@@ -331,6 +351,11 @@ public class DataWindow : Plugin
             HorizontalAlignment = HorizontalAlignment.Right,
             Margin = new Thickness(0, 0, 10, 0),
             Padding = new Thickness(5),
+        };
+        public static TextBlock SettingsLabel(string label) => new()
+        {
+            Text = label,
+            HorizontalAlignment = HorizontalAlignment.Left,
         };
         // add border to a control
         public static Border AddBorder(ControlBase control, Thickness? thickness)
@@ -342,12 +367,11 @@ public class DataWindow : Plugin
             {
                 Child = control,
                 Style = borderStyle,
-                Padding = 0,
-                Margin = 0,
-                BorderThickness = (Thickness?)thickness ?? new(1)
+                BorderThickness = thickness ?? new(1),
+                BorderColor = Color.FromHex("#848a86"),
             };
         }
-        public static Border AddBoxBorder(ControlBase child)
+        public static Border AddBoxBorder(ControlBase child, Thickness? margin)
         {
             Style boxBorderStyle = new();
             boxBorderStyle.Set(ControlProperty.BackgroundColor, Color.FromHex("#292929"), ControlState.DarkTheme);
@@ -356,7 +380,7 @@ public class DataWindow : Plugin
             {
                 Child = child,
                 CornerRadius = new(3),
-                Margin = new(1, 1, 5, 0),
+                Margin = margin ?? 0,
                 Padding = new(20, 0, 20, 0),
                 Style = boxBorderStyle,
             };
@@ -367,6 +391,7 @@ public class DataWindow : Plugin
             Grid rowContainer = new(1, 2);
             rowContainer.AddChild(UI.AddBorder(UI.RowLabel(rowKey.ToString()), new Thickness(0, 0, 1, 1)), 0, 0);
             rowContainer.AddChild(UI.AddBorder(value, new Thickness(0, 0, 0, 1)), 0, 1);
+            rowContainer.IsVisible = (bool)Settings.Instance[rowKey]; // initial visibility setup
             Settings.Instance.SettingsModified += (key, value) => { if( key == rowKey ) rowContainer.IsVisible = value; }; // show or hide when setting changes
             return rowContainer;
         }        
@@ -397,7 +422,7 @@ public class DataWindow : Plugin
                     Width = _panelWidth, 
                     Margin = Spacer
                 };
-                _text = UI.RowLabel(key.ToString()); // text label for this toggle
+                _text = UI.SettingsLabel(key.ToString()); // text label for this toggle
                 _control = new() // the circle inside the toggle
                 { 
                     Margin = 0,  
@@ -451,8 +476,7 @@ public class DataWindow : Plugin
     {
         // convert value into pips
         public static double ToPips(double val, double pipsize) => val / pipsize;
-        
+        // get decimal places based on pipsize
         public static int GetDP(double pipsize) => pipsize < 1 ? pipsize.ToString().Split(".")[1].Length + 1 : 0;
-        
     }
 }        
